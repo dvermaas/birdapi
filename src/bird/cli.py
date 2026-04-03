@@ -117,7 +117,7 @@ def _format_tweet(tweet) -> str:
 
 def _dump_tweet(tweet, as_json: bool) -> None:
     if as_json:
-        click.echo(json.dumps(_tweet_to_dict(tweet), ensure_ascii=False))
+        click.echo(json.dumps(_tweet_to_dict(tweet), ensure_ascii=False, indent=2))
     else:
         click.echo(_format_tweet(tweet))
 
@@ -133,23 +133,32 @@ def _dump_tweets(tweets, as_json: bool) -> None:
 def _tweet_to_dict(tweet) -> dict:
     d: dict = {
         "id": tweet.id,
-        "text": tweet.text,
-        "author": {"username": tweet.author.username, "name": tweet.author.name},
-        "authorId": tweet.author_id,
+        "text": _unescape(tweet.text),
         "createdAt": tweet.created_at,
         "replyCount": tweet.reply_count,
         "retweetCount": tweet.retweet_count,
         "likeCount": tweet.like_count,
         "conversationId": tweet.conversation_id,
-        "inReplyToStatusId": tweet.in_reply_to_status_id,
     }
+    if tweet.in_reply_to_status_id:
+        d["inReplyToStatusId"] = tweet.in_reply_to_status_id
+    d["author"] = {"username": tweet.author.username, "name": tweet.author.name}
+    d["authorId"] = tweet.author_id
     if tweet.quoted_tweet:
         d["quotedTweet"] = _tweet_to_dict(tweet.quoted_tweet)
     if tweet.media:
-        d["media"] = [
-            {k: v for k, v in m.__dict__.items() if v is not None}
-            for m in tweet.media
-        ]
+        d["media"] = [_media_to_dict(m) for m in tweet.media]
+    return d
+
+
+def _media_to_dict(m) -> dict:
+    d: dict = {"type": m.type, "url": m.url}
+    if m.width is not None:
+        d["width"] = m.width
+    if m.height is not None:
+        d["height"] = m.height
+    if m.preview_url is not None:
+        d["previewUrl"] = m.preview_url
     return d
 
 
@@ -281,7 +290,7 @@ def search(ctx, query, count, as_json, cursor, max_pages):
     with _client(ctx) as client:
         tweets, next_cursor = client.search(query, count, cursor=cursor, max_pages=max_pages)
     if as_json:
-        click.echo(json.dumps({"tweets": [_tweet_to_dict(t) for t in tweets], "nextCursor": next_cursor}, ensure_ascii=False))
+        click.echo(json.dumps([_tweet_to_dict(t) for t in tweets], ensure_ascii=False, indent=2))
     else:
         _dump_tweets(tweets, False)
 
@@ -323,7 +332,7 @@ def user_tweets(ctx, handle, count, as_json, cursor):
             sys.exit(1)
         tweets, next_cursor = client.get_user_tweets(user.id, count, cursor=cursor)
     if as_json:
-        click.echo(json.dumps({"tweets": [_tweet_to_dict(t) for t in tweets], "nextCursor": next_cursor}, ensure_ascii=False))
+        click.echo(json.dumps([_tweet_to_dict(t) for t in tweets], ensure_ascii=False, indent=2))
     else:
         _dump_tweets(tweets, False)
 
@@ -349,7 +358,7 @@ def bookmarks(ctx, count, folder_id, fetch_all, max_pages, cursor, as_json):
             limit, folder_id=folder_id, cursor=cursor, max_pages=max_pages
         )
     if as_json:
-        click.echo(json.dumps({"tweets": [_tweet_to_dict(t) for t in tweets], "nextCursor": next_cursor}, ensure_ascii=False))
+        click.echo(json.dumps([_tweet_to_dict(t) for t in tweets], ensure_ascii=False, indent=2))
     else:
         _dump_tweets(tweets, False)
 
@@ -385,7 +394,7 @@ def likes(ctx, count, as_json, cursor):
     with _client(ctx) as client:
         tweets, next_cursor = client.get_likes(count, cursor=cursor)
     if as_json:
-        click.echo(json.dumps({"tweets": [_tweet_to_dict(t) for t in tweets], "nextCursor": next_cursor}, ensure_ascii=False))
+        click.echo(json.dumps([_tweet_to_dict(t) for t in tweets], ensure_ascii=False, indent=2))
     else:
         _dump_tweets(tweets, False)
 
@@ -511,7 +520,7 @@ def list_timeline(ctx, list_id_or_url, count, as_json, cursor, max_pages):
     with _client(ctx) as client:
         tweets, next_cursor = client.get_list_timeline(list_id, count, cursor=cursor, max_pages=max_pages)
     if as_json:
-        click.echo(json.dumps({"tweets": [_tweet_to_dict(t) for t in tweets], "nextCursor": next_cursor}, ensure_ascii=False))
+        click.echo(json.dumps([_tweet_to_dict(t) for t in tweets], ensure_ascii=False, indent=2))
     else:
         _dump_tweets(tweets, False)
 
