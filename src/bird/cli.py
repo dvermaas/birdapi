@@ -2,12 +2,17 @@
 
 from __future__ import annotations
 
+import io
 import json
 import os
 import sys
 from typing import Optional
 
 import click
+
+# Ensure stdout can handle Unicode on Windows (e.g. cp1252 terminals)
+if sys.stdout and hasattr(sys.stdout, "buffer"):
+    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
 
 from .client import TwitterClient
 from ._config import load_credentials, resolve_credentials, save_credentials
@@ -61,11 +66,60 @@ def _client(ctx) -> TwitterClient:
     return _make_client(o["auth_token"], o["ct0"], o["timeout"])
 
 
+# ---------------------------------------------------------------------------
+# Pretty-print helpers
+# ---------------------------------------------------------------------------
+
+import html as _html
+
+_SEPARATOR = "\u2500" * 50  # ──────────────────────────────────────────────────
+
+
+def _unescape(text: str) -> str:
+    return _html.unescape(text)
+
+
+def _format_tweet(tweet) -> str:
+    lines: list[str] = []
+
+    # Header: @username (Full Name):
+    lines.append(f"@{tweet.author.username} ({tweet.author.name}):")
+
+    # Tweet text
+    lines.append(_unescape(tweet.text))
+
+    # Quoted tweet box
+    if tweet.quoted_tweet:
+        qt = tweet.quoted_tweet
+        lines.append(f"\u250c\u2500 QT @{qt.author.username}:")
+        for body_line in _unescape(qt.text).splitlines():
+            lines.append(f"\u2502 {body_line}")
+        if qt.media:
+            for m in qt.media:
+                icon = "\U0001f3ac" if m.type in ("video", "animated_gif") else "\U0001f5bc\ufe0f"
+                lines.append(f"\u2502 {icon} {m.url}")
+        lines.append(f"\u2514\u2500 https://x.com/{qt.author.username}/status/{qt.id}")
+
+    # Media on the outer tweet
+    if tweet.media:
+        for m in tweet.media:
+            icon = "\U0001f3ac" if m.type in ("video", "animated_gif") else "\U0001f5bc\ufe0f"
+            lines.append(f"{icon} {m.url}")
+
+    # Metadata
+    if tweet.created_at:
+        lines.append(f"\U0001f4c5 {tweet.created_at}")
+    lines.append(f"\U0001f517 https://x.com/{tweet.author.username}/status/{tweet.id}")
+    lines.append(_SEPARATOR)
+
+    return "\n".join(lines)
+
+
 def _dump_tweet(tweet, as_json: bool) -> None:
     if as_json:
         click.echo(json.dumps(_tweet_to_dict(tweet), ensure_ascii=False))
     else:
-        click.echo(f"[{tweet.id}] @{tweet.author.username}: {tweet.text}")
+        click.echo(_format_tweet(tweet))
 
 
 def _dump_tweets(tweets, as_json: bool) -> None:
@@ -73,7 +127,7 @@ def _dump_tweets(tweets, as_json: bool) -> None:
         click.echo(json.dumps([_tweet_to_dict(t) for t in tweets], ensure_ascii=False))
     else:
         for t in tweets:
-            click.echo(f"[{t.id}] @{t.author.username}: {t.text}")
+            click.echo(_format_tweet(t))
 
 
 def _tweet_to_dict(tweet) -> dict:
