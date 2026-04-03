@@ -40,10 +40,23 @@ def _make_client(
 
 
 # ---------------------------------------------------------------------------
+# Shorthand group: bird <tweet-id-or-url> → bird read <tweet-id-or-url>
+# ---------------------------------------------------------------------------
+
+class BirdGroup(click.Group):
+    def resolve_command(self, ctx, args):
+        cmd_name = args[0] if args else None
+        if cmd_name and cmd_name not in self.commands and not cmd_name.startswith("-"):
+            if cmd_name.isdigit() or "/status/" in cmd_name or "x.com" in cmd_name or "twitter.com" in cmd_name:
+                args.insert(0, "read")
+        return super().resolve_command(ctx, args)
+
+
+# ---------------------------------------------------------------------------
 # Global options
 # ---------------------------------------------------------------------------
 
-@click.group()
+@click.group(cls=BirdGroup)
 @click.pass_context
 @click.option("--auth-token", envvar=["AUTH_TOKEN", "TWITTER_AUTH_TOKEN"], hidden=True)
 @click.option("--ct0", envvar=["CT0", "TWITTER_CT0"], hidden=True)
@@ -51,7 +64,13 @@ def _make_client(
               help="Request timeout in milliseconds.")
 @click.option("--json", "as_json", is_flag=True)
 @click.option("--quote-depth", type=int, default=1, envvar="BIRD_QUOTE_DEPTH")
-def main(ctx: click.Context, auth_token, ct0, timeout, as_json, quote_depth):
+@click.option("--plain", is_flag=True, default=False,
+              help="Plain output: no emoji, no color (stable for scripting).")
+@click.option("--no-emoji", "no_emoji", is_flag=True, default=False,
+              help="Disable emoji in output.")
+@click.option("--no-color", "no_color", is_flag=True, default=False,
+              help="Disable ANSI colors (or set NO_COLOR env var).")
+def main(ctx: click.Context, auth_token, ct0, timeout, as_json, quote_depth, plain, no_emoji, no_color):
     """bird — fast X/Twitter CLI (cookie auth, no browser extraction)."""
     ctx.ensure_object(dict)
     ctx.obj["auth_token"] = auth_token
@@ -59,6 +78,11 @@ def main(ctx: click.Context, auth_token, ct0, timeout, as_json, quote_depth):
     ctx.obj["timeout"] = timeout / 1000 if timeout else None
     ctx.obj["as_json"] = as_json
     ctx.obj["quote_depth"] = quote_depth
+    # plain implies both no_emoji and no_color
+    ctx.obj["plain"] = plain or no_emoji or no_color
+    # Respect NO_COLOR env var
+    if os.environ.get("NO_COLOR"):
+        ctx.obj["plain"] = True
 
 
 def _client(ctx) -> TwitterClient:
@@ -79,7 +103,7 @@ def _unescape(text: str) -> str:
     return _html.unescape(text)
 
 
-def _format_tweet(tweet) -> str:
+def _format_tweet(tweet, plain: bool = False, show_stats: bool = False) -> str:
     lines: list[str] = []
 
     # Header: @username (Full Name):
@@ -96,41 +120,70 @@ def _format_tweet(tweet) -> str:
             lines.append(f"\u2502 {body_line}")
         if qt.media:
             for m in qt.media:
-                icon = "\U0001f3ac" if m.type in ("video", "animated_gif") else "\U0001f5bc\ufe0f"
-                lines.append(f"\u2502 {icon} {m.url}")
+                if plain:
+                    tag = "[video]" if m.type in ("video", "animated_gif") else "[image]"
+                    lines.append(f"\u2502 {tag} {m.url}")
+                else:
+                    icon = "\U0001f3ac" if m.type in ("video", "animated_gif") else "\U0001f5bc\ufe0f"
+                    lines.append(f"\u2502 {icon} {m.url}")
         lines.append(f"\u2514\u2500 https://x.com/{qt.author.username}/status/{qt.id}")
 
     # Media on the outer tweet
     if tweet.media:
         for m in tweet.media:
-            icon = "\U0001f3ac" if m.type in ("video", "animated_gif") else "\U0001f5bc\ufe0f"
-            lines.append(f"{icon} {m.url}")
+            if plain:
+                tag = "[video]" if m.type in ("video", "animated_gif") else "[image]"
+                lines.append(f"{tag} {m.url}")
+            else:
+                icon = "\U0001f3ac" if m.type in ("video", "animated_gif") else "\U0001f5bc\ufe0f"
+                lines.append(f"{icon} {m.url}")
 
     # Metadata
     if tweet.created_at:
-        lines.append(f"\U0001f4c5 {tweet.created_at}")
-    lines.append(f"\U0001f517 https://x.com/{tweet.author.username}/status/{tweet.id}")
-    lines.append(_SEPARATOR)
+        if plain:
+            lines.append(f"date: {tweet.created_at}")
+        else:
+            lines.append(f"\U0001f4c5 {tweet.created_at}")
+    url = f"https://x.com/{tweet.author.username}/status/{tweet.id}"
+    if plain:
+        lines.append(f"url: {url}")
+    else:
+        lines.append(f"\U0001f517 {url}")
+
+    # Engagement stats (shown for single-tweet read, not list views)
+    if show_stats and not plain:
+        parts = []
+        if tweet.like_count is not None:
+            parts.append(f"\u2764\ufe0f {tweet.like_count}")
+        if tweet.retweet_count is not None:
+            parts.append(f"\U0001f501 {tweet.retweet_count}")
+        if tweet.reply_count is not None:
+            parts.append(f"\U0001f4ac {tweet.reply_count}")
+        if parts:
+            lines.append("  ".join(parts))
+    else:
+        lines.append(_SEPARATOR)
 
     return "\n".join(lines)
 
 
-def _dump_tweet(tweet, as_json: bool) -> None:
+def _dump_tweet(tweet, as_json: bool, plain: bool = False, include_raw: bool = False,
+                show_stats: bool = False) -> None:
     if as_json:
-        click.echo(json.dumps(_tweet_to_dict(tweet), ensure_ascii=False, indent=2))
+        click.echo(json.dumps(_tweet_to_dict(tweet, include_raw=include_raw), ensure_ascii=False, indent=2))
     else:
-        click.echo(_format_tweet(tweet))
+        click.echo(_format_tweet(tweet, plain=plain, show_stats=show_stats))
 
 
-def _dump_tweets(tweets, as_json: bool) -> None:
+def _dump_tweets(tweets, as_json: bool, plain: bool = False, include_raw: bool = False) -> None:
     if as_json:
-        click.echo(json.dumps([_tweet_to_dict(t) for t in tweets], ensure_ascii=False))
+        click.echo(json.dumps([_tweet_to_dict(t, include_raw=include_raw) for t in tweets], ensure_ascii=False))
     else:
         for t in tweets:
-            click.echo(_format_tweet(t))
+            click.echo(_format_tweet(t, plain=plain))
 
 
-def _tweet_to_dict(tweet) -> dict:
+def _tweet_to_dict(tweet, include_raw: bool = False) -> dict:
     d: dict = {
         "id": tweet.id,
         "text": _unescape(tweet.text),
@@ -145,9 +198,11 @@ def _tweet_to_dict(tweet) -> dict:
     d["author"] = {"username": tweet.author.username, "name": tweet.author.name}
     d["authorId"] = tweet.author_id
     if tweet.quoted_tweet:
-        d["quotedTweet"] = _tweet_to_dict(tweet.quoted_tweet)
+        d["quotedTweet"] = _tweet_to_dict(tweet.quoted_tweet, include_raw=include_raw)
     if tweet.media:
         d["media"] = [_media_to_dict(m) for m in tweet.media]
+    if include_raw and tweet._raw is not None:
+        d["_raw"] = tweet._raw
     return d
 
 
@@ -183,20 +238,23 @@ def _user_to_dict(user) -> dict:
 @main.command()
 @click.argument("tweet_id_or_url")
 @click.option("--json", "as_json", is_flag=True)
+@click.option("--json-full", "json_full", is_flag=True,
+              help="Include raw API response in _raw field.")
 @click.pass_context
-def read(ctx, tweet_id_or_url, as_json):
+def read(ctx, tweet_id_or_url, as_json, json_full):
     """Fetch and display a tweet by ID or URL."""
     tweet_id = extract_tweet_id(tweet_id_or_url)
     if not tweet_id:
         click.echo(f"Error: cannot parse tweet ID from {tweet_id_or_url!r}", err=True)
         sys.exit(1)
-    as_json = as_json or ctx.obj.get("as_json")
+    as_json = as_json or json_full or ctx.obj.get("as_json")
+    plain = ctx.obj.get("plain", False)
     with _client(ctx) as client:
-        tweet = client.get_tweet(tweet_id)
+        tweet = client.get_tweet(tweet_id, include_raw=json_full)
     if not tweet:
         click.echo("Tweet not found.", err=True)
         sys.exit(1)
-    _dump_tweet(tweet, as_json)
+    _dump_tweet(tweet, as_json, plain=plain, include_raw=json_full, show_stats=True)
 
 
 # ---------------------------------------------------------------------------
@@ -206,34 +264,40 @@ def read(ctx, tweet_id_or_url, as_json):
 @main.command()
 @click.argument("tweet_id_or_url")
 @click.option("--json", "as_json", is_flag=True)
+@click.option("--json-full", "json_full", is_flag=True,
+              help="Include raw API response in _raw field.")
 @click.pass_context
-def thread(ctx, tweet_id_or_url, as_json):
+def thread(ctx, tweet_id_or_url, as_json, json_full):
     """Show the full conversation thread for a tweet."""
     tweet_id = extract_tweet_id(tweet_id_or_url)
     if not tweet_id:
         click.echo(f"Error: cannot parse tweet ID from {tweet_id_or_url!r}", err=True)
         sys.exit(1)
-    as_json = as_json or ctx.obj.get("as_json")
+    as_json = as_json or json_full or ctx.obj.get("as_json")
+    plain = ctx.obj.get("plain", False)
     with _client(ctx) as client:
-        tweets = client.get_thread(tweet_id)
-    _dump_tweets(tweets, as_json)
+        tweets = client.get_thread(tweet_id, include_raw=json_full)
+    _dump_tweets(tweets, as_json, plain=plain, include_raw=json_full)
 
 
 @main.command()
 @click.argument("tweet_id_or_url")
 @click.option("-n", "--count", default=20, show_default=True)
 @click.option("--json", "as_json", is_flag=True)
+@click.option("--json-full", "json_full", is_flag=True,
+              help="Include raw API response in _raw field.")
 @click.pass_context
-def replies(ctx, tweet_id_or_url, count, as_json):
+def replies(ctx, tweet_id_or_url, count, as_json, json_full):
     """List replies to a tweet."""
     tweet_id = extract_tweet_id(tweet_id_or_url)
     if not tweet_id:
         click.echo(f"Error: cannot parse tweet ID from {tweet_id_or_url!r}", err=True)
         sys.exit(1)
-    as_json = as_json or ctx.obj.get("as_json")
+    as_json = as_json or json_full or ctx.obj.get("as_json")
+    plain = ctx.obj.get("plain", False)
     with _client(ctx) as client:
-        tweets = client.get_replies(tweet_id)
-    _dump_tweets(tweets[:count], as_json)
+        tweets = client.get_replies(tweet_id, include_raw=json_full)
+    _dump_tweets(tweets[:count], as_json, plain=plain, include_raw=json_full)
 
 
 # ---------------------------------------------------------------------------
@@ -281,31 +345,39 @@ def post_reply(ctx, tweet_id_or_url, text):
 @click.argument("query")
 @click.option("-n", "--count", default=20, show_default=True)
 @click.option("--json", "as_json", is_flag=True)
+@click.option("--json-full", "json_full", is_flag=True,
+              help="Include raw API response in _raw field.")
 @click.option("--cursor", default=None)
 @click.option("--max-pages", type=int, default=None)
 @click.pass_context
-def search(ctx, query, count, as_json, cursor, max_pages):
+def search(ctx, query, count, as_json, json_full, cursor, max_pages):
     """Search for tweets matching a query."""
-    as_json = as_json or ctx.obj.get("as_json")
+    as_json = as_json or json_full or ctx.obj.get("as_json")
+    plain = ctx.obj.get("plain", False)
     with _client(ctx) as client:
-        tweets, next_cursor = client.search(query, count, cursor=cursor, max_pages=max_pages)
+        tweets, next_cursor = client.search(query, count, cursor=cursor, max_pages=max_pages,
+                                             include_raw=json_full)
     if as_json:
-        click.echo(json.dumps([_tweet_to_dict(t) for t in tweets], ensure_ascii=False, indent=2))
+        click.echo(json.dumps([_tweet_to_dict(t, include_raw=json_full) for t in tweets],
+                               ensure_ascii=False, indent=2))
     else:
-        _dump_tweets(tweets, False)
+        _dump_tweets(tweets, False, plain=plain)
 
 
 @main.command()
-@click.option("--user", default=None, help="@handle to search mentions for")
+@click.option("-u", "--user", default=None, help="@handle to search mentions for")
 @click.option("-n", "--count", default=20, show_default=True)
 @click.option("--json", "as_json", is_flag=True)
+@click.option("--json-full", "json_full", is_flag=True,
+              help="Include raw API response in _raw field.")
 @click.pass_context
-def mentions(ctx, user, count, as_json):
+def mentions(ctx, user, count, as_json, json_full):
     """Find tweets mentioning a user (defaults to authenticated user)."""
-    as_json = as_json or ctx.obj.get("as_json")
+    as_json = as_json or json_full or ctx.obj.get("as_json")
+    plain = ctx.obj.get("plain", False)
     with _client(ctx) as client:
-        tweets, _ = client.get_mentions(user, count)
-    _dump_tweets(tweets, as_json)
+        tweets, _ = client.get_mentions(user, count, include_raw=json_full)
+    _dump_tweets(tweets, as_json, plain=plain, include_raw=json_full)
 
 
 # ---------------------------------------------------------------------------
@@ -316,11 +388,17 @@ def mentions(ctx, user, count, as_json):
 @click.argument("handle")
 @click.option("-n", "--count", default=20, show_default=True)
 @click.option("--json", "as_json", is_flag=True)
+@click.option("--json-full", "json_full", is_flag=True,
+              help="Include raw API response in _raw field.")
 @click.option("--cursor", default=None)
+@click.option("--max-pages", type=int, default=None)
+@click.option("--delay", "delay_ms", type=int, default=1000, show_default=True,
+              help="Delay in ms between page fetches when paginating.")
 @click.pass_context
-def user_tweets(ctx, handle, count, as_json, cursor):
+def user_tweets(ctx, handle, count, as_json, json_full, cursor, max_pages, delay_ms):
     """Get tweets from a user's profile timeline."""
-    as_json = as_json or ctx.obj.get("as_json")
+    as_json = as_json or json_full or ctx.obj.get("as_json")
+    plain = ctx.obj.get("plain", False)
     norm = normalize_handle(handle)
     if not norm:
         click.echo(f"Invalid handle: {handle!r}", err=True)
@@ -330,11 +408,15 @@ def user_tweets(ctx, handle, count, as_json, cursor):
         if not user:
             click.echo(f"User @{norm} not found.", err=True)
             sys.exit(1)
-        tweets, next_cursor = client.get_user_tweets(user.id, count, cursor=cursor)
+        tweets, next_cursor = client.get_user_tweets(
+            user.id, count, cursor=cursor, max_pages=max_pages,
+            include_raw=json_full, page_delay=delay_ms / 1000,
+        )
     if as_json:
-        click.echo(json.dumps([_tweet_to_dict(t) for t in tweets], ensure_ascii=False, indent=2))
+        click.echo(json.dumps([_tweet_to_dict(t, include_raw=json_full) for t in tweets],
+                               ensure_ascii=False, indent=2))
     else:
-        _dump_tweets(tweets, False)
+        _dump_tweets(tweets, False, plain=plain)
 
 
 # ---------------------------------------------------------------------------
@@ -348,19 +430,24 @@ def user_tweets(ctx, handle, count, as_json, cursor):
 @click.option("--max-pages", type=int, default=None)
 @click.option("--cursor", default=None)
 @click.option("--json", "as_json", is_flag=True)
+@click.option("--json-full", "json_full", is_flag=True,
+              help="Include raw API response in _raw field.")
 @click.pass_context
-def bookmarks(ctx, count, folder_id, fetch_all, max_pages, cursor, as_json):
+def bookmarks(ctx, count, folder_id, fetch_all, max_pages, cursor, as_json, json_full):
     """List bookmarked tweets."""
-    as_json = as_json or ctx.obj.get("as_json")
+    as_json = as_json or json_full or ctx.obj.get("as_json")
+    plain = ctx.obj.get("plain", False)
     limit = -1 if fetch_all else count
     with _client(ctx) as client:
         tweets, next_cursor = client.get_bookmarks(
-            limit, folder_id=folder_id, cursor=cursor, max_pages=max_pages
+            limit, folder_id=folder_id, cursor=cursor, max_pages=max_pages,
+            include_raw=json_full,
         )
     if as_json:
-        click.echo(json.dumps([_tweet_to_dict(t) for t in tweets], ensure_ascii=False, indent=2))
+        click.echo(json.dumps([_tweet_to_dict(t, include_raw=json_full) for t in tweets],
+                               ensure_ascii=False, indent=2))
     else:
-        _dump_tweets(tweets, False)
+        _dump_tweets(tweets, False, plain=plain)
 
 
 @main.command()
@@ -386,17 +473,21 @@ def unbookmark(ctx, tweet_ids_or_urls):
 @main.command()
 @click.option("-n", "--count", default=20, show_default=True)
 @click.option("--json", "as_json", is_flag=True)
+@click.option("--json-full", "json_full", is_flag=True,
+              help="Include raw API response in _raw field.")
 @click.option("--cursor", default=None)
 @click.pass_context
-def likes(ctx, count, as_json, cursor):
+def likes(ctx, count, as_json, json_full, cursor):
     """List liked tweets."""
-    as_json = as_json or ctx.obj.get("as_json")
+    as_json = as_json or json_full or ctx.obj.get("as_json")
+    plain = ctx.obj.get("plain", False)
     with _client(ctx) as client:
-        tweets, next_cursor = client.get_likes(count, cursor=cursor)
+        tweets, next_cursor = client.get_likes(count, cursor=cursor, include_raw=json_full)
     if as_json:
-        click.echo(json.dumps([_tweet_to_dict(t) for t in tweets], ensure_ascii=False, indent=2))
+        click.echo(json.dumps([_tweet_to_dict(t, include_raw=json_full) for t in tweets],
+                               ensure_ascii=False, indent=2))
     else:
-        _dump_tweets(tweets, False)
+        _dump_tweets(tweets, False, plain=plain)
 
 
 # ---------------------------------------------------------------------------
@@ -407,16 +498,19 @@ def likes(ctx, count, as_json, cursor):
 @click.option("-n", "--count", default=20, show_default=True)
 @click.option("--following", is_flag=True, help="Show Following (chronological) feed")
 @click.option("--json", "as_json", is_flag=True)
+@click.option("--json-full", "json_full", is_flag=True,
+              help="Include raw API response in _raw field.")
 @click.pass_context
-def home(ctx, count, following, as_json):
+def home(ctx, count, following, as_json, json_full):
     """Fetch home timeline (For You or Following feed)."""
-    as_json = as_json or ctx.obj.get("as_json")
+    as_json = as_json or json_full or ctx.obj.get("as_json")
+    plain = ctx.obj.get("plain", False)
     with _client(ctx) as client:
         if following:
             tweets = client.get_home_latest_timeline(count)
         else:
             tweets = client.get_home_timeline(count)
-    _dump_tweets(tweets, as_json)
+    _dump_tweets(tweets, as_json, plain=plain, include_raw=json_full)
 
 
 # ---------------------------------------------------------------------------
@@ -476,6 +570,58 @@ def followers(ctx, user, count, as_json, cursor):
 
 
 # ---------------------------------------------------------------------------
+# follow / unfollow
+# ---------------------------------------------------------------------------
+
+def _resolve_user_id(client, username_or_id: str) -> Optional[str]:
+    """Return a numeric user ID from a bare ID or @handle / handle."""
+    val = username_or_id.lstrip("@").strip()
+    if val.isdigit():
+        return val
+    norm = normalize_handle(val)
+    if not norm:
+        return None
+    user = client.get_user_id_by_username(norm)
+    return user.id if user else None
+
+
+@main.command(name="follow")
+@click.argument("username_or_id")
+@click.pass_context
+def follow_user(ctx, username_or_id):
+    """Follow a user (username with or without @, or numeric user ID)."""
+    with _client(ctx) as client:
+        uid = _resolve_user_id(client, username_or_id)
+        if not uid:
+            click.echo(f"User not found: {username_or_id!r}", err=True)
+            sys.exit(1)
+        ok = client.follow(uid)
+    if ok:
+        click.echo(f"Followed: {username_or_id}")
+    else:
+        click.echo(f"Failed to follow: {username_or_id}", err=True)
+        sys.exit(1)
+
+
+@main.command(name="unfollow")
+@click.argument("username_or_id")
+@click.pass_context
+def unfollow_user(ctx, username_or_id):
+    """Unfollow a user (username with or without @, or numeric user ID)."""
+    with _client(ctx) as client:
+        uid = _resolve_user_id(client, username_or_id)
+        if not uid:
+            click.echo(f"User not found: {username_or_id!r}", err=True)
+            sys.exit(1)
+        ok = client.unfollow(uid)
+    if ok:
+        click.echo(f"Unfollowed: {username_or_id}")
+    else:
+        click.echo(f"Failed to unfollow: {username_or_id}", err=True)
+        sys.exit(1)
+
+
+# ---------------------------------------------------------------------------
 # lists / list-timeline
 # ---------------------------------------------------------------------------
 
@@ -507,22 +653,27 @@ def list_lists(ctx, member_of, count, as_json):
 @click.argument("list_id_or_url")
 @click.option("-n", "--count", default=20, show_default=True)
 @click.option("--json", "as_json", is_flag=True)
+@click.option("--json-full", "json_full", is_flag=True,
+              help="Include raw API response in _raw field.")
 @click.option("--cursor", default=None)
 @click.option("--max-pages", type=int, default=None)
 @click.pass_context
-def list_timeline(ctx, list_id_or_url, count, as_json, cursor, max_pages):
+def list_timeline(ctx, list_id_or_url, count, as_json, json_full, cursor, max_pages):
     """Get tweets from a list timeline."""
     list_id = extract_list_id(list_id_or_url)
     if not list_id:
         click.echo(f"Cannot parse list ID from {list_id_or_url!r}", err=True)
         sys.exit(1)
-    as_json = as_json or ctx.obj.get("as_json")
+    as_json = as_json or json_full or ctx.obj.get("as_json")
+    plain = ctx.obj.get("plain", False)
     with _client(ctx) as client:
-        tweets, next_cursor = client.get_list_timeline(list_id, count, cursor=cursor, max_pages=max_pages)
+        tweets, next_cursor = client.get_list_timeline(list_id, count, cursor=cursor,
+                                                        max_pages=max_pages, include_raw=json_full)
     if as_json:
-        click.echo(json.dumps([_tweet_to_dict(t) for t in tweets], ensure_ascii=False, indent=2))
+        click.echo(json.dumps([_tweet_to_dict(t, include_raw=json_full) for t in tweets],
+                               ensure_ascii=False, indent=2))
     else:
-        _dump_tweets(tweets, False)
+        _dump_tweets(tweets, False, plain=plain)
 
 
 # ---------------------------------------------------------------------------
@@ -545,6 +696,7 @@ def news(ctx, count, ai_only, with_tweets, tweets_per_item,
          tab_for_you, tab_news, tab_sports, tab_entertainment, tab_trending, as_json):
     """Fetch news and trending topics from X's Explore tabs."""
     as_json = as_json or ctx.obj.get("as_json")
+    plain = ctx.obj.get("plain", False)
     tabs: list[str] = []
     if tab_for_you:
         tabs.append("forYou")
@@ -633,8 +785,8 @@ def about(ctx, handle, as_json):
             click.echo(f"Based in: {profile.account_based_in}")
         if profile.source:
             click.echo(f"Source: {profile.source}")
-        if profile.created_country_accurate:
-            click.echo(f"Created in: {profile.created_country_accurate}")
+        if profile.learn_more_url:
+            click.echo(f"Info: {profile.learn_more_url}")
 
 
 @main.command()

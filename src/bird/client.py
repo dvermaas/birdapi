@@ -256,6 +256,7 @@ class TwitterClient:
         limit: int,
         max_pages: Optional[int] = None,
         initial_cursor: Optional[str] = None,
+        page_delay: float = 0.0,
     ) -> tuple[list[Tweet], Optional[str], Optional[str]]:
         """Generic tweet pagination loop.
 
@@ -269,6 +270,8 @@ class TwitterClient:
         unlimited = limit == math.inf or limit < 0
 
         while unlimited or len(tweets) < limit:
+            if pages_fetched > 0 and page_delay > 0:
+                time.sleep(page_delay)
             page_count = _PAGE_SIZE if unlimited else min(_PAGE_SIZE, limit - len(tweets))
             page_tweets, page_cursor, had_404, error = fetch_page(cursor, page_count)
 
@@ -511,7 +514,7 @@ class TwitterClient:
                     pass
         return None
 
-    def get_tweet(self, tweet_id: str) -> Optional[Tweet]:
+    def get_tweet(self, tweet_id: str, include_raw: bool = False) -> Optional[Tweet]:
         """Fetch a single tweet by ID."""
         data = self._fetch_tweet_detail(tweet_id)
         if not data:
@@ -523,7 +526,7 @@ class TwitterClient:
                 tweet_id,
             )
         )
-        mapped = map_tweet_result(result, self._quote_depth)
+        mapped = map_tweet_result(result, self._quote_depth, include_raw)
         if mapped and result and result.get("article"):
             title = _first_text(
                 (result["article"].get("article_results") or {}).get("result", {}).get("title"),
@@ -539,7 +542,7 @@ class TwitterClient:
                         mapped.text = f"{fallback['title']}\n\n{pt}" if fallback.get("title") else pt
         return mapped
 
-    def get_replies(self, tweet_id: str) -> list[Tweet]:
+    def get_replies(self, tweet_id: str, include_raw: bool = False) -> list[Tweet]:
         """Fetch the first page of replies to a tweet."""
         data = self._fetch_tweet_detail(tweet_id)
         if not data:
@@ -547,10 +550,10 @@ class TwitterClient:
         instructions = (
             (data.get("threaded_conversation_with_injections_v2") or {}).get("instructions")
         )
-        tweets = parse_tweets_from_instructions(instructions, self._quote_depth)
+        tweets = parse_tweets_from_instructions(instructions, self._quote_depth, include_raw)
         return [t for t in tweets if t.in_reply_to_status_id == tweet_id]
 
-    def get_thread(self, tweet_id: str) -> list[Tweet]:
+    def get_thread(self, tweet_id: str, include_raw: bool = False) -> list[Tweet]:
         """Fetch the full conversation thread for a tweet."""
         data = self._fetch_tweet_detail(tweet_id)
         if not data:
@@ -558,7 +561,7 @@ class TwitterClient:
         instructions = (
             (data.get("threaded_conversation_with_injections_v2") or {}).get("instructions")
         )
-        tweets = parse_tweets_from_instructions(instructions, self._quote_depth)
+        tweets = parse_tweets_from_instructions(instructions, self._quote_depth, include_raw)
         target = next((t for t in tweets if t.id == tweet_id), None)
         root_id = (target.conversation_id if target else None) or tweet_id
         thread = [t for t in tweets if t.conversation_id == root_id]
@@ -620,6 +623,7 @@ class TwitterClient:
         *,
         cursor: Optional[str] = None,
         max_pages: Optional[int] = None,
+        include_raw: bool = False,
     ) -> tuple[list[Tweet], Optional[str]]:
         """Search for tweets.  Returns ``(tweets, next_cursor)``."""
         features = search_features()
@@ -659,7 +663,7 @@ class TwitterClient:
                         .get("timeline", {})
                         .get("instructions")
                     )
-                    page_tweets = parse_tweets_from_instructions(instructions, self._quote_depth)
+                    page_tweets = parse_tweets_from_instructions(instructions, self._quote_depth, include_raw)
                     next_cur = extract_cursor_from_instructions(instructions)
                     return page_tweets, next_cur, False, None
                 except Exception as exc:
@@ -675,6 +679,7 @@ class TwitterClient:
         self,
         username: Optional[str] = None,
         count: int = 20,
+        include_raw: bool = False,
     ) -> tuple[list[Tweet], Optional[str]]:
         """Search for mentions of *username* (defaults to authenticated user)."""
         if username:
@@ -687,7 +692,7 @@ class TwitterClient:
             if not user:
                 return [], None
             q = f"@{user.username}"
-        return self.search(q, count)
+        return self.search(q, count, include_raw=include_raw)
 
     # ------------------------------------------------------------------
     # Posting
@@ -930,17 +935,19 @@ class TwitterClient:
         folder_id: Optional[str] = None,
         cursor: Optional[str] = None,
         max_pages: Optional[int] = None,
+        include_raw: bool = False,
     ) -> tuple[list[Tweet], Optional[str]]:
         """Fetch bookmarked tweets.  Returns ``(tweets, next_cursor)``."""
         if folder_id:
-            return self._bookmarks_folder(folder_id, count, cursor, max_pages)
-        return self._bookmarks_main(count, cursor, max_pages)
+            return self._bookmarks_folder(folder_id, count, cursor, max_pages, include_raw)
+        return self._bookmarks_main(count, cursor, max_pages, include_raw)
 
     def _bookmarks_main(
         self,
         limit: int,
         initial_cursor: Optional[str],
         max_pages: Optional[int],
+        include_raw: bool = False,
     ) -> tuple[list[Tweet], Optional[str]]:
         features = bookmarks_features()
         qids = list(dict.fromkeys([
@@ -978,7 +985,7 @@ class TwitterClient:
                         .get("timeline", {})
                         .get("instructions")
                     )
-                    page_tweets = parse_tweets_from_instructions(instructions, self._quote_depth)
+                    page_tweets = parse_tweets_from_instructions(instructions, self._quote_depth, include_raw)
                     next_cur = extract_cursor_from_instructions(instructions)
                     return page_tweets, next_cur, False, None
                 except Exception as exc:
@@ -994,6 +1001,7 @@ class TwitterClient:
         limit: int,
         initial_cursor: Optional[str],
         max_pages: Optional[int],
+        include_raw: bool = False,
     ) -> tuple[list[Tweet], Optional[str]]:
         features = bookmarks_features()
         qids = list(dict.fromkeys([
@@ -1028,7 +1036,7 @@ class TwitterClient:
                         .get("timeline", {})
                         .get("instructions")
                     )
-                    page_tweets = parse_tweets_from_instructions(instructions, self._quote_depth)
+                    page_tweets = parse_tweets_from_instructions(instructions, self._quote_depth, include_raw)
                     next_cur = extract_cursor_from_instructions(instructions)
                     return page_tweets, next_cur, False, None
                 except Exception as exc:
@@ -1048,6 +1056,7 @@ class TwitterClient:
         *,
         cursor: Optional[str] = None,
         max_pages: Optional[int] = None,
+        include_raw: bool = False,
     ) -> tuple[list[Tweet], Optional[str]]:
         """Fetch liked tweets for the current user.  Returns ``(tweets, next_cursor)``."""
         user = self.get_current_user()
@@ -1088,7 +1097,7 @@ class TwitterClient:
                         .get("timeline", {})
                         .get("instructions")
                     )
-                    page_tweets = parse_tweets_from_instructions(instructions, self._quote_depth)
+                    page_tweets = parse_tweets_from_instructions(instructions, self._quote_depth, include_raw)
                     next_cur = extract_cursor_from_instructions(instructions)
                     return page_tweets, next_cur, False, None
                 except Exception as exc:
@@ -1109,6 +1118,8 @@ class TwitterClient:
         *,
         cursor: Optional[str] = None,
         max_pages: Optional[int] = None,
+        include_raw: bool = False,
+        page_delay: float = 0.0,
     ) -> tuple[list[Tweet], Optional[str]]:
         """Fetch tweets from a user's profile timeline.  Returns ``(tweets, next_cursor)``."""
         features = user_tweets_features()
@@ -1154,14 +1165,14 @@ class TwitterClient:
                         msgs = ", ".join(e.get("message", "") for e in errors)
                         if not instructions:
                             return [], None, False, msgs
-                    page_tweets = parse_tweets_from_instructions(instructions, self._quote_depth)
+                    page_tweets = parse_tweets_from_instructions(instructions, self._quote_depth, include_raw)
                     next_cur = extract_cursor_from_instructions(instructions)
                     return page_tweets, next_cur, False, None
                 except Exception as exc:
                     return [], None, False, str(exc)
             return [], None, False, "No query IDs available"
 
-        tweets, next_cursor, _ = self._paginate(fetch_page, count, effective_max, cursor)
+        tweets, next_cursor, _ = self._paginate(fetch_page, count, effective_max, cursor, page_delay=page_delay)
         return tweets, next_cursor
 
     # ------------------------------------------------------------------
@@ -1456,6 +1467,7 @@ class TwitterClient:
         *,
         cursor: Optional[str] = None,
         max_pages: Optional[int] = None,
+        include_raw: bool = False,
     ) -> tuple[list[Tweet], Optional[str]]:
         """Fetch tweets from a list timeline.  Returns ``(tweets, next_cursor)``."""
         features = lists_features()
@@ -1487,7 +1499,7 @@ class TwitterClient:
                         .get("timeline", {})
                         .get("instructions")
                     )
-                    page_tweets = parse_tweets_from_instructions(instructions, self._quote_depth)
+                    page_tweets = parse_tweets_from_instructions(instructions, self._quote_depth, include_raw)
                     next_cur = extract_cursor_from_instructions(instructions)
                     return page_tweets, next_cur, False, None
                 except Exception as exc:
