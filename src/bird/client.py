@@ -744,23 +744,35 @@ class TwitterClient:
                         TWITTER_API_BASE, headers=headers, content=build_body(qid).encode()
                     )
             if not r.is_success:
-                return None
+                raise RuntimeError(f"HTTP {r.status_code}: {r.text[:200]}")
             data = r.json()
             errors = data.get("errors") or []
             if errors:
+                msgs = ", ".join(
+                    (e or {}).get("message") or f"Error {(e or {}).get('code', '?')}"
+                    for e in errors
+                )
                 # Fallback to legacy REST on error code 226 (bot detection)
                 if any((e or {}).get("code") == 226 for e in errors):
-                    return self._post_status_update(variables)
-                return None
-            return (
+                    fallback = self._post_status_update(variables)
+                    if fallback:
+                        return fallback
+                    raise RuntimeError(msgs)
+                raise RuntimeError(msgs)
+            tweet_id = (
                 (data.get("data") or {})
                 .get("create_tweet", {})
                 .get("tweet_results", {})
                 .get("result", {})
                 .get("rest_id")
             )
-        except Exception:
-            return None
+            if not tweet_id:
+                raise RuntimeError("Tweet created but no ID returned")
+            return tweet_id
+        except RuntimeError:
+            raise
+        except Exception as exc:
+            raise RuntimeError(str(exc)) from exc
 
     def _post_status_update(self, variables: dict) -> Optional[str]:
         """Legacy statuses/update.json fallback for tweet creation."""

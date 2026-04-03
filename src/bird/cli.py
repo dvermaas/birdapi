@@ -309,13 +309,18 @@ def replies(ctx, tweet_id_or_url, count, as_json, json_full):
 @click.pass_context
 def post_tweet(ctx, text):
     """Post a new tweet."""
-    with _client(ctx) as client:
-        tweet_id = client.tweet(text)
-    if tweet_id:
-        click.echo(f"Posted: https://x.com/i/status/{tweet_id}")
-    else:
-        click.echo("Failed to post tweet.", err=True)
+    plain = ctx.obj.get("plain", False)
+    try:
+        with _client(ctx) as client:
+            tweet_id = client.tweet(text)
+    except RuntimeError as exc:
+        click.echo(f"Failed to post tweet: {exc}", err=True)
         sys.exit(1)
+    url = f"https://x.com/i/status/{tweet_id}"
+    if plain:
+        click.echo(f"Tweet posted successfully!\n{url}")
+    else:
+        click.echo(f"\u2705 Tweet posted successfully!\n\U0001f517 {url}")
 
 
 @main.command(name="reply")
@@ -324,17 +329,22 @@ def post_tweet(ctx, text):
 @click.pass_context
 def post_reply(ctx, tweet_id_or_url, text):
     """Reply to a tweet."""
+    plain = ctx.obj.get("plain", False)
     tweet_id = extract_tweet_id(tweet_id_or_url)
     if not tweet_id:
         click.echo(f"Error: cannot parse tweet ID from {tweet_id_or_url!r}", err=True)
         sys.exit(1)
-    with _client(ctx) as client:
-        new_id = client.reply(text, tweet_id)
-    if new_id:
-        click.echo(f"Replied: https://x.com/i/status/{new_id}")
-    else:
-        click.echo("Failed to post reply.", err=True)
+    try:
+        with _client(ctx) as client:
+            new_id = client.reply(text, tweet_id)
+    except RuntimeError as exc:
+        click.echo(f"Failed to post reply: {exc}", err=True)
         sys.exit(1)
+    url = f"https://x.com/i/status/{new_id}"
+    if plain:
+        click.echo(f"Reply posted successfully!\n{url}")
+    else:
+        click.echo(f"\u2705 Reply posted successfully!\n\U0001f517 {url}")
 
 
 # ---------------------------------------------------------------------------
