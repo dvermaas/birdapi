@@ -1,5 +1,7 @@
 """Unit tests for _utils.py — no network required."""
 
+from datetime import timezone
+
 import pytest
 from bird._utils import (
     extract_bookmark_folder_id,
@@ -8,6 +10,7 @@ from bird._utils import (
     extract_tweet_id,
     map_tweet_result,
     normalize_handle,
+    parse_tweet_datetime,
     parse_tweets_from_instructions,
     render_content_state,
 )
@@ -211,6 +214,28 @@ def test_map_tweet_result_visibility_wrapper():
     assert tweet is not None
     assert tweet.id == "1"
     assert tweet.text == "Hello"
+
+
+def test_parse_tweet_datetime_valid():
+    dt = parse_tweet_datetime("Sun Jun 07 23:11:05 +0000 2026")
+    assert dt is not None
+    assert (dt.year, dt.month, dt.day, dt.hour) == (2026, 6, 7, 23)
+    assert dt.tzinfo is not None
+    assert dt.utcoffset().total_seconds() == 0
+
+
+def test_parse_tweet_datetime_invalid():
+    assert parse_tweet_datetime(None) is None
+    assert parse_tweet_datetime("") is None
+    assert parse_tweet_datetime("not a date") is None
+
+
+def test_parse_tweet_datetime_is_comparable():
+    older = parse_tweet_datetime("Mon Jan 01 00:00:00 +0000 2024")
+    newer = parse_tweet_datetime("Sun Jun 07 23:11:05 +0000 2026")
+    cutoff = parse_tweet_datetime("Mon Jan 01 00:00:00 +0000 2026")
+    assert older < cutoff < newer
+    assert cutoff.tzinfo == timezone.utc or cutoff.utcoffset().total_seconds() == 0
 
 
 def test_parse_tweets_from_instructions_visibility_wrapper():

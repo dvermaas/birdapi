@@ -6,6 +6,7 @@ import io
 import json
 import os
 import sys
+from datetime import datetime, timezone
 from typing import Optional
 
 import click
@@ -27,6 +28,7 @@ def _make_client(
     auth_token: Optional[str],
     ct0: Optional[str],
     timeout: Optional[float],
+    min_request_interval: float = 0.0,
 ) -> TwitterClient:
     tok, csrf = resolve_credentials(auth_token, ct0)
     if not tok or not csrf:
@@ -36,7 +38,7 @@ def _make_client(
             err=True,
         )
         sys.exit(1)
-    return TwitterClient(tok, csrf, timeout=timeout)
+    return TwitterClient(tok, csrf, timeout=timeout, min_request_interval=min_request_interval)
 
 
 # ---------------------------------------------------------------------------
@@ -62,6 +64,8 @@ class BirdGroup(click.Group):
 @click.option("--ct0", envvar=["CT0", "TWITTER_CT0"], hidden=True)
 @click.option("--timeout", type=float, default=None, envvar="BIRD_TIMEOUT_MS",
               help="Request timeout in milliseconds.")
+@click.option("--rate-limit", "rate_limit", type=float, default=0.0, envvar="BIRD_RATE_LIMIT",
+              help="Minimum seconds between calls to x.com (0 = off). e.g. --rate-limit 5")
 @click.option("--json", "as_json", is_flag=True)
 @click.option("--quote-depth", type=int, default=1, envvar="BIRD_QUOTE_DEPTH")
 @click.option("--plain", is_flag=True, default=False,
@@ -70,12 +74,13 @@ class BirdGroup(click.Group):
               help="Disable emoji in output.")
 @click.option("--no-color", "no_color", is_flag=True, default=False,
               help="Disable ANSI colors (or set NO_COLOR env var).")
-def main(ctx: click.Context, auth_token, ct0, timeout, as_json, quote_depth, plain, no_emoji, no_color):
+def main(ctx: click.Context, auth_token, ct0, timeout, rate_limit, as_json, quote_depth, plain, no_emoji, no_color):
     """bird — fast X/Twitter CLI (cookie auth, no browser extraction)."""
     ctx.ensure_object(dict)
     ctx.obj["auth_token"] = auth_token
     ctx.obj["ct0"] = ct0
     ctx.obj["timeout"] = timeout / 1000 if timeout else None
+    ctx.obj["rate_limit"] = max(0.0, rate_limit or 0.0)
     ctx.obj["as_json"] = as_json
     ctx.obj["quote_depth"] = quote_depth
     # plain implies both no_emoji and no_color
@@ -87,7 +92,24 @@ def main(ctx: click.Context, auth_token, ct0, timeout, as_json, quote_depth, pla
 
 def _client(ctx) -> TwitterClient:
     o = ctx.obj
-    return _make_client(o["auth_token"], o["ct0"], o["timeout"])
+    return _make_client(o["auth_token"], o["ct0"], o["timeout"], o.get("rate_limit", 0.0))
+
+
+def _parse_since(value: str) -> datetime:
+    """Parse --since (YYYY-MM-DD or ISO 8601) into an aware UTC datetime."""
+    s = value.strip()
+    try:
+        if len(s) == 10 and s.count("-") == 2:
+            dt = datetime.strptime(s, "%Y-%m-%d")
+        else:
+            dt = datetime.fromisoformat(s.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise click.BadParameter(
+            f"Invalid date {value!r}. Use YYYY-MM-DD or ISO 8601."
+        ) from exc
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt
 
 
 # ---------------------------------------------------------------------------
@@ -402,10 +424,13 @@ def mentions(ctx, user, count, as_json, json_full):
               help="Include raw API response in _raw field.")
 @click.option("--cursor", default=None)
 @click.option("--max-pages", type=int, default=None)
+@click.option("--since", "since", default=None,
+              help="Fetch tweets back to this date (YYYY-MM-DD or ISO 8601) instead "
+                   "of a fixed count. -n caps the result; --max-pages bounds requests.")
 @click.option("--delay", "delay_ms", type=int, default=1000, show_default=True,
               help="Delay in ms between page fetches when paginating.")
 @click.pass_context
-def user_tweets(ctx, handle, count, as_json, json_full, cursor, max_pages, delay_ms):
+def user_tweets(ctx, handle, count, as_json, json_full, cursor, max_pages, since, delay_ms):
     """Get tweets from a user's profile timeline."""
     as_json = as_json or json_full or ctx.obj.get("as_json")
     plain = ctx.obj.get("plain", False)
@@ -413,6 +438,10 @@ def user_tweets(ctx, handle, count, as_json, json_full, cursor, max_pages, delay
     if not norm:
         click.echo(f"Invalid handle: {handle!r}", err=True)
         sys.exit(1)
+    since_dt = _parse_since(since) if since else None
+    # In since-mode, a default (unset) -n shouldn't cap results; an explicit -n does.
+    if since_dt is not None and ctx.get_parameter_source("count") != click.core.ParameterSource.COMMANDLINE:
+        count = None
     with _client(ctx) as client:
         user = client.get_user_id_by_username(norm)
         if not user:
@@ -420,7 +449,7 @@ def user_tweets(ctx, handle, count, as_json, json_full, cursor, max_pages, delay
             sys.exit(1)
         tweets, next_cursor = client.get_user_tweets(
             user.id, count, cursor=cursor, max_pages=max_pages,
-            include_raw=json_full, page_delay=delay_ms / 1000,
+            include_raw=json_full, page_delay=delay_ms / 1000, since=since_dt,
         )
     if as_json:
         click.echo(json.dumps([_tweet_to_dict(t, include_raw=json_full) for t in tweets],

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+from datetime import datetime
 from typing import Any, Optional
 
 from ._models import (
@@ -19,6 +20,19 @@ from ._models import (
 # ---------------------------------------------------------------------------
 
 _HANDLE_RE = re.compile(r"^[A-Za-z0-9_]{1,15}$")
+
+# X timestamp format, e.g. "Sun Jun 07 23:11:05 +0000 2026"
+_TWEET_TIME_FMT = "%a %b %d %H:%M:%S %z %Y"
+
+
+def parse_tweet_datetime(created_at: Optional[str]) -> Optional[datetime]:
+    """Parse a tweet ``created_at`` string into an aware datetime, or None."""
+    if not created_at:
+        return None
+    try:
+        return datetime.strptime(created_at, _TWEET_TIME_FMT)
+    except (ValueError, TypeError):
+        return None
 
 
 def normalize_handle(raw: Optional[str]) -> Optional[str]:

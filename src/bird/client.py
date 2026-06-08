@@ -15,6 +15,7 @@ import os
 import re
 import time
 import uuid
+from datetime import datetime
 from typing import Any, Optional
 
 import httpx
@@ -56,6 +57,7 @@ from ._utils import (
     find_tweet_in_instructions,
     map_tweet_result,
     normalize_handle,
+    parse_tweet_datetime,
     parse_tweets_from_instructions,
     parse_users_from_instructions,
 )
@@ -66,6 +68,9 @@ _DEFAULT_UA = (
     "Chrome/131.0.0.0 Safari/537.36"
 )
 _PAGE_SIZE = 20
+# --since pagination safety bounds: default page budget and hard ceiling.
+_SINCE_DEFAULT_PAGES = 25
+_SINCE_MAX_PAGES = 50
 
 # Regex to detect query-ID mismatch errors in 400/422 responses
 _RAW_QUERY_MISSING_RE = re.compile(r"must be defined", re.IGNORECASE)
@@ -128,6 +133,7 @@ class TwitterClient:
         user_agent: str = _DEFAULT_UA,
         timeout: Optional[float] = None,
         quote_depth: int = 1,
+        min_request_interval: float = 0.0,
     ) -> None:
         if not auth_token or not ct0:
             raise ValueError("Both auth_token and ct0 are required")
@@ -137,6 +143,9 @@ class TwitterClient:
         self._user_agent = user_agent
         self._timeout = timeout
         self._quote_depth = max(0, int(quote_depth))
+        # Client-side rate limit: minimum seconds between HTTP calls (0 = off).
+        self._min_request_interval = max(0.0, float(min_request_interval))
+        self._last_request_at = 0.0
         self._client_uuid = str(uuid.uuid4())
         self._client_device_id = str(uuid.uuid4())
         self._client_user_id: Optional[str] = None
@@ -202,13 +211,25 @@ class TwitterClient:
         if result and result.id:
             self._client_user_id = result.id
 
+    def _throttle(self) -> None:
+        """Enforce the optional minimum interval between outbound HTTP calls."""
+        if self._min_request_interval <= 0:
+            return
+        wait = self._min_request_interval - (time.monotonic() - self._last_request_at)
+        if wait > 0:
+            time.sleep(wait)
+        self._last_request_at = time.monotonic()
+
     def _get(self, url: str) -> httpx.Response:
+        self._throttle()
         return self._http.get(url, headers=self._json_headers())
 
     def _post(self, url: str, body: str) -> httpx.Response:
+        self._throttle()
         return self._http.post(url, headers=self._json_headers(), content=body.encode())
 
     def _post_form(self, url: str, data: dict, extra_headers: Optional[dict] = None) -> httpx.Response:
+        self._throttle()
         headers = {**self._base_headers(), "content-type": "application/x-www-form-urlencoded"}
         if extra_headers:
             headers.update(extra_headers)
@@ -257,8 +278,14 @@ class TwitterClient:
         max_pages: Optional[int] = None,
         initial_cursor: Optional[str] = None,
         page_delay: float = 0.0,
+        since: Optional[datetime] = None,
     ) -> tuple[list[Tweet], Optional[str], Optional[str]]:
         """Generic tweet pagination loop.
+
+        When ``since`` is set, tweets older than the cutoff are dropped and
+        paging stops once a page's oldest tweet predates it. The page's *last*
+        tweet (not any tweet) drives the stop decision so a pinned tweet — which
+        sits at the top regardless of date — doesn't trigger an early stop.
 
         Returns (tweets, next_cursor, error).
         """
@@ -294,10 +321,21 @@ class TwitterClient:
             for t in page_tweets:
                 if t.id in seen:
                     continue
+                if since is not None:
+                    dt = parse_tweet_datetime(t.created_at)
+                    if dt is not None and dt < since:
+                        continue  # older than cutoff — drop (handles pinned dupes too)
                 seen.add(t.id)
                 tweets.append(t)
                 added += 1
                 if not unlimited and len(tweets) >= limit:
+                    break
+
+            # Stop once the page's oldest (last, chronological) tweet predates the cutoff.
+            if since is not None and page_tweets:
+                last_dt = parse_tweet_datetime(page_tweets[-1].created_at)
+                if last_dt is not None and last_dt < since:
+                    next_cursor = None
                     break
 
             if not page_cursor or page_cursor == cursor or not page_tweets or added == 0:
@@ -1130,23 +1168,37 @@ class TwitterClient:
     def get_user_tweets(
         self,
         user_id: str,
-        count: int = 20,
+        count: Optional[int] = 20,
         *,
         cursor: Optional[str] = None,
         max_pages: Optional[int] = None,
         include_raw: bool = False,
         page_delay: float = 0.0,
+        since: Optional[datetime] = None,
     ) -> tuple[list[Tweet], Optional[str]]:
-        """Fetch tweets from a user's profile timeline.  Returns ``(tweets, next_cursor)``."""
+        """Fetch tweets from a user's profile timeline.  Returns ``(tweets, next_cursor)``.
+
+        ``since`` (aware datetime) fetches everything back to that cutoff instead
+        of a fixed ``count``: paging continues until tweets predate it, bounded
+        by ``max_pages`` (default ``_SINCE_DEFAULT_PAGES``). When ``since`` is set
+        ``count`` becomes an optional upper cap (``None`` = no tweet cap).
+        """
         features = user_tweets_features()
         qids = list(dict.fromkeys([self._get_query_id("UserTweets"), "Wms1GvIiHXAPBaCr9KblaA"]))
-        hard_max = 10
-        # +1 page of headroom: a profile page of N entries nets fewer than N
-        # tweets (cursors, who-to-follow, pinned dupes, gated tweets), so allow
-        # one extra page to top up to `count`. The _paginate loop stops as soon
-        # as `count` is reached, so the common case is still 1 request.
-        computed_max = math.ceil(count / _PAGE_SIZE) + 1
-        effective_max = min(hard_max, max_pages or computed_max)
+        if since is not None:
+            # since-mode: date is the goal; max_pages is the safety bound and
+            # count is an optional upper cap on returned tweets.
+            limit = count if count is not None else math.inf
+            effective_max = min(_SINCE_MAX_PAGES, max_pages or _SINCE_DEFAULT_PAGES)
+        else:
+            limit = count if count is not None else _PAGE_SIZE
+            hard_max = 10
+            # +1 page of headroom: a profile page of N entries nets fewer than N
+            # tweets (cursors, who-to-follow, pinned dupes, gated tweets), so allow
+            # one extra page to top up to `count`. The _paginate loop stops as soon
+            # as `count` is reached, so the common case is still 1 request.
+            computed_max = math.ceil(limit / _PAGE_SIZE) + 1
+            effective_max = min(hard_max, max_pages or computed_max)
 
         def fetch_page(page_cursor, page_count):
             variables: dict[str, Any] = {
@@ -1192,7 +1244,9 @@ class TwitterClient:
                     return [], None, False, str(exc)
             return [], None, False, "No query IDs available"
 
-        tweets, next_cursor, _ = self._paginate(fetch_page, count, effective_max, cursor, page_delay=page_delay)
+        tweets, next_cursor, _ = self._paginate(
+            fetch_page, limit, effective_max, cursor, page_delay=page_delay, since=since,
+        )
         return tweets, next_cursor
 
     # ------------------------------------------------------------------
