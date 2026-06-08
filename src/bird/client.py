@@ -272,7 +272,11 @@ class TwitterClient:
         while unlimited or len(tweets) < limit:
             if pages_fetched > 0 and page_delay > 0:
                 time.sleep(page_delay)
-            page_count = _PAGE_SIZE if unlimited else min(_PAGE_SIZE, limit - len(tweets))
+            # Always request a full page. X returns timeline *entries*, many of
+            # which (cursors, who-to-follow, gated dupes) aren't tweets, so a
+            # short request like count=1 wastes a round-trip; we trim to `limit`
+            # via the inner break below.
+            page_count = _PAGE_SIZE
             page_tweets, page_cursor, had_404, error = fetch_page(cursor, page_count)
 
             if error and not page_tweets:
@@ -1137,7 +1141,11 @@ class TwitterClient:
         features = user_tweets_features()
         qids = list(dict.fromkeys([self._get_query_id("UserTweets"), "Wms1GvIiHXAPBaCr9KblaA"]))
         hard_max = 10
-        computed_max = max(1, math.ceil(count / _PAGE_SIZE))
+        # +1 page of headroom: a profile page of N entries nets fewer than N
+        # tweets (cursors, who-to-follow, pinned dupes, gated tweets), so allow
+        # one extra page to top up to `count`. The _paginate loop stops as soon
+        # as `count` is reached, so the common case is still 1 request.
+        computed_max = math.ceil(count / _PAGE_SIZE) + 1
         effective_max = min(hard_max, max_pages or computed_max)
 
         def fetch_page(page_cursor, page_count):
@@ -1211,7 +1219,9 @@ class TwitterClient:
         cursor: Optional[str] = None
 
         while len(tweets) < count:
-            page_count = min(_PAGE_SIZE, count - len(tweets))
+            # Request full pages; non-tweet entries get filtered, so a partial
+            # request under-delivers. Trimmed to `count` after the dedup loop.
+            page_count = _PAGE_SIZE
             had_404 = False
             success = False
             for qid in qids:
@@ -1253,6 +1263,8 @@ class TwitterClient:
                             seen.add(t.id)
                             tweets.append(t)
                             added += 1
+                            if len(tweets) >= count:
+                                break
                     if not new_cursor or new_cursor == cursor or not page_tweets or added == 0:
                         return tweets
                     cursor = new_cursor

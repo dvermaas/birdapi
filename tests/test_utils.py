@@ -203,6 +203,26 @@ def test_parse_tweets_deduplication():
     assert len(tweets) == 1
 
 
+def test_map_tweet_result_visibility_wrapper():
+    # Visibility-gated tweets nest the real tweet under .tweet with no top rest_id.
+    inner = _make_raw_tweet()
+    wrapped = {"__typename": "TweetWithVisibilityResults", "tweet": inner}
+    tweet = map_tweet_result(wrapped)
+    assert tweet is not None
+    assert tweet.id == "1"
+    assert tweet.text == "Hello"
+
+
+def test_parse_tweets_from_instructions_visibility_wrapper():
+    # Regression: accounts under visibility gating return all tweets wrapped as
+    # TweetWithVisibilityResults; without unwrapping the parser yielded 0 tweets.
+    inner = _make_raw_tweet()
+    wrapped = {"__typename": "TweetWithVisibilityResults", "tweet": inner}
+    tweets = parse_tweets_from_instructions(_instructions_with_tweet(wrapped))
+    assert len(tweets) == 1
+    assert tweets[0].id == "1"
+
+
 # ---------------------------------------------------------------------------
 # extract_cursor_from_instructions
 # ---------------------------------------------------------------------------

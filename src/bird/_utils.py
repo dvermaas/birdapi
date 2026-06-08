@@ -353,6 +353,10 @@ def map_tweet_result(
 ) -> Optional[Tweet]:
     if not result:
         return None
+    # Unwrap TweetWithVisibilityResults for callers that pass the raw result directly.
+    result = _unwrap_tweet_result(result)
+    if not result:
+        return None
     user_result = (result.get("core") or {}).get("user_results", {}).get("result") or {}
     user_legacy = user_result.get("legacy") or {}
     user_core = user_result.get("core") or {}
@@ -401,6 +405,9 @@ def _collect_tweet_results_from_entry(entry: dict) -> list[dict]:
     content = entry.get("content") or {}
 
     def push(r: Optional[dict]) -> None:
+        # Visibility-gated tweets arrive wrapped as TweetWithVisibilityResults,
+        # with rest_id nested under .tweet — unwrap before the rest_id check.
+        r = _unwrap_tweet_result(r)
         if r and r.get("rest_id"):
             results.append(r)
 
@@ -451,6 +458,7 @@ def find_tweet_in_instructions(
             result = (entry.get("content") or {}).get("itemContent", {}).get(
                 "tweet_results", {}
             ).get("result")
+            result = _unwrap_tweet_result(result)
             if result and result.get("rest_id") == tweet_id:
                 return result
     return None
