@@ -44,10 +44,12 @@ from ._features import (
 )
 from ._models import (
     AboutProfile,
+    Author,
     NewsItem,
     Tweet,
     TwitterList,
     User,
+    UserProfile,
 )
 from ._query_ids import query_id_store
 from ._utils import (
@@ -56,6 +58,7 @@ from ._utils import (
     extract_cursor_from_instructions,
     find_tweet_in_instructions,
     map_tweet_result,
+    map_user_profile_result,
     normalize_handle,
     parse_tweet_datetime,
     parse_tweets_from_instructions,
@@ -479,6 +482,69 @@ class TwitterClient:
                         username=data.get("screen_name", handle),
                         name=data.get("name", handle),
                     )
+            except Exception:
+                pass
+        return None
+
+    def get_user_profile(
+        self, username: str, include_raw: bool = False
+    ) -> Optional[UserProfile]:
+        """Fetch full profile information for a user via UserByScreenName."""
+        handle = normalize_handle(username)
+        if not handle:
+            return None
+        qids = list(dict.fromkeys([
+            self._get_query_id("UserByScreenName"),
+            "681MIj51w00Aj6dY0GXnHw",
+            "xc8f1g7BYqr6VTzTbvNlGw",
+        ]))
+        variables = {"screen_name": handle, "withGrokTranslatedBio": True}
+        features = {
+            "hidden_profile_subscriptions_enabled": True,
+            "profile_label_improvements_pcf_label_in_post_enabled": True,
+            "responsive_web_profile_redirect_enabled": False,
+            "rweb_tipjar_consumption_enabled": False,
+            "verified_phone_label_enabled": False,
+            "subscriptions_verification_info_is_identity_verified_enabled": True,
+            "subscriptions_verification_info_verified_since_enabled": True,
+            "highlights_tweets_tab_ui_enabled": True,
+            "responsive_web_twitter_article_notes_tab_enabled": True,
+            "subscriptions_feature_can_gift_premium": True,
+            "creator_subscriptions_tweet_preview_api_enabled": True,
+            "responsive_web_graphql_skip_user_profile_image_extensions_enabled": False,
+            "responsive_web_graphql_timeline_navigation_enabled": True,
+        }
+        params = httpx.QueryParams(
+            variables=json.dumps(variables),
+            features=json.dumps(features),
+            fieldToggles=json.dumps({"withPayments": False, "withAuxiliaryUserLabels": True}),
+        )
+        had_404 = False
+        for qid in qids:
+            try:
+                r = self._get(f"{TWITTER_API_BASE}/{qid}/UserByScreenName?{params}")
+                if r.status_code == 404:
+                    had_404 = True
+                    continue
+                if not r.is_success:
+                    continue
+                data = r.json()
+                result = (data.get("data") or {}).get("user", {}).get("result") or {}
+                if result.get("__typename") == "UserUnavailable":
+                    return None
+                profile = map_user_profile_result(result, include_raw)
+                if profile:
+                    return profile
+            except Exception:
+                pass
+        if had_404:
+            self._refresh_query_ids()
+            try:
+                qid = self._get_query_id("UserByScreenName")
+                r = self._get(f"{TWITTER_API_BASE}/{qid}/UserByScreenName?{params}")
+                if r.is_success:
+                    result = (r.json().get("data") or {}).get("user", {}).get("result") or {}
+                    return map_user_profile_result(result, include_raw)
             except Exception:
                 pass
         return None

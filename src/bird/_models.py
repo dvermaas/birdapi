@@ -8,6 +8,7 @@ from typing import Any, Optional
 class Author:
     username: str
     name: str
+    profile_image_url: Optional[str] = None
 
 
 @dataclass
@@ -36,6 +37,7 @@ class Tweet:
     reply_count: Optional[int] = None
     retweet_count: Optional[int] = None
     like_count: Optional[int] = None
+    view_count: Optional[int] = None
     conversation_id: Optional[str] = None
     in_reply_to_status_id: Optional[str] = None
     author_id: Optional[str] = None
@@ -56,6 +58,38 @@ class User:
     is_blue_verified: Optional[bool] = None
     profile_image_url: Optional[str] = None
     created_at: Optional[str] = None
+
+
+@dataclass
+class UserProfile:
+    """Full profile information from the UserByScreenName endpoint."""
+
+    id: str
+    username: str
+    name: str
+    description: Optional[str] = None
+    location: Optional[str] = None
+    website: Optional[str] = None
+    created_at: Optional[str] = None
+    followers_count: Optional[int] = None
+    following_count: Optional[int] = None
+    tweet_count: Optional[int] = None
+    media_count: Optional[int] = None
+    listed_count: Optional[int] = None
+    likes_count: Optional[int] = None
+    is_blue_verified: Optional[bool] = None
+    is_verified: Optional[bool] = None
+    verified_type: Optional[str] = None
+    is_identity_verified: Optional[bool] = None
+    verified_since: Optional[str] = None
+    profile_image_url: Optional[str] = None
+    profile_banner_url: Optional[str] = None
+    is_protected: Optional[bool] = None
+    can_dm: Optional[bool] = None
+    pinned_tweet_ids: Optional[list[str]] = None
+    professional_type: Optional[str] = None
+    professional_category: Optional[str] = None
+    _raw: Optional[Any] = field(default=None, repr=False)
 
 
 @dataclass

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import re
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Optional
 
 from ._models import (
@@ -12,6 +12,7 @@ from ._models import (
     MediaItem,
     Tweet,
     User,
+    UserProfile,
 )
 
 
@@ -360,6 +361,24 @@ def _unwrap_tweet_result(result: Optional[dict]) -> Optional[dict]:
     return result.get("tweet") or result
 
 
+def _extract_view_count(result: dict, legacy: dict) -> Optional[int]:
+    """Pull the impression count from views.count (or legacy ext_views)."""
+    raw = (result.get("views") or {}).get("count")
+    if raw is None:
+        raw = (legacy.get("ext_views") or {}).get("count")
+    try:
+        return int(raw) if raw is not None else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _extract_user_avatar(user_result: dict) -> Optional[str]:
+    return (
+        (user_result.get("avatar") or {}).get("image_url")
+        or (user_result.get("legacy") or {}).get("profile_image_url_https")
+    )
+
+
 def map_tweet_result(
     result: Optional[dict],
     quote_depth: int = 1,
@@ -397,11 +416,16 @@ def map_tweet_result(
     tweet = Tweet(
         id=result["rest_id"],
         text=text,
-        author=Author(username=username, name=name or username),
+        author=Author(
+            username=username,
+            name=name or username,
+            profile_image_url=_extract_user_avatar(user_result),
+        ),
         created_at=legacy.get("created_at"),
         reply_count=legacy.get("reply_count"),
         retweet_count=legacy.get("retweet_count"),
         like_count=legacy.get("favorite_count"),
+        view_count=_extract_view_count(result, legacy),
         conversation_id=legacy.get("conversation_id_str"),
         in_reply_to_status_id=legacy.get("in_reply_to_status_id_str") or None,
         author_id=user_id,
@@ -476,6 +500,89 @@ def find_tweet_in_instructions(
             if result and result.get("rest_id") == tweet_id:
                 return result
     return None
+
+
+def map_user_profile_result(
+    result: Optional[dict],
+    include_raw: bool = False,
+) -> Optional[UserProfile]:
+    """Map a UserByScreenName ``user.result`` payload to a UserProfile.
+
+    Handles both the new schema (core/avatar/privacy/location/profile_bio)
+    and the legacy field layout.
+    """
+    if not result:
+        return None
+    if result.get("__typename") == "UserWithVisibilityResults" and result.get("user"):
+        result = result["user"]
+    legacy = result.get("legacy") or {}
+    core = result.get("core") or {}
+    username = core.get("screen_name") or legacy.get("screen_name")
+    if not result.get("rest_id") or not username:
+        return None
+
+    website: Optional[str] = None
+    for u in ((legacy.get("entities") or {}).get("url") or {}).get("urls") or []:
+        if u.get("expanded_url"):
+            website = u["expanded_url"]
+            break
+    if not website:
+        website = legacy.get("url")
+
+    verification = result.get("verification") or {}
+    verification_info = result.get("verification_info") or {}
+    verified_since: Optional[str] = None
+    msec = (verification_info.get("reason") or {}).get("verified_since_msec")
+    try:
+        if msec is not None:
+            verified_since = datetime.fromtimestamp(
+                int(msec) / 1000, tz=timezone.utc
+            ).isoformat()
+    except (TypeError, ValueError, OSError, OverflowError):
+        verified_since = None
+
+    privacy = result.get("privacy") or {}
+    is_protected = privacy.get("protected")
+    if is_protected is None:
+        is_protected = legacy.get("protected")
+
+    professional = result.get("professional") or {}
+    categories = professional.get("category") or []
+    professional_category = next(
+        (c.get("name") for c in categories if c.get("name")), None
+    )
+
+    profile = UserProfile(
+        id=result["rest_id"],
+        username=username,
+        name=core.get("name") or legacy.get("name") or username,
+        description=(result.get("profile_bio") or {}).get("description")
+        or legacy.get("description"),
+        location=(result.get("location") or {}).get("location") or legacy.get("location"),
+        website=website,
+        created_at=core.get("created_at") or legacy.get("created_at"),
+        followers_count=legacy.get("followers_count"),
+        following_count=legacy.get("friends_count"),
+        tweet_count=legacy.get("statuses_count"),
+        media_count=legacy.get("media_count"),
+        listed_count=legacy.get("listed_count"),
+        likes_count=legacy.get("favourites_count"),
+        is_blue_verified=result.get("is_blue_verified"),
+        is_verified=verification.get("verified"),
+        verified_type=verification.get("verified_type"),
+        is_identity_verified=verification_info.get("is_identity_verified"),
+        verified_since=verified_since,
+        profile_image_url=_extract_user_avatar(result),
+        profile_banner_url=legacy.get("profile_banner_url"),
+        is_protected=is_protected,
+        can_dm=(result.get("dm_permissions") or {}).get("can_dm"),
+        pinned_tweet_ids=legacy.get("pinned_tweet_ids_str") or None,
+        professional_type=professional.get("professional_type"),
+        professional_category=professional_category,
+    )
+    if include_raw:
+        profile._raw = result
+    return profile
 
 
 def parse_users_from_instructions(instructions: Optional[list]) -> list[User]:

@@ -79,6 +79,7 @@ client.get_home_timeline(count)             # → list[Tweet]
 client.get_home_latest_timeline(count)      # → list[Tweet]
 client.get_current_user()                   # → User | None
 client.get_user_id_by_username(handle)      # → User | None
+client.get_user_profile(handle)             # → UserProfile | None (full profile via UserByScreenName)
 client.get_following(user_id, count)        # → (list[User], next_cursor)
 client.get_followers(user_id, count)        # → (list[User], next_cursor)
 client.like/unlike/retweet/unretweet/bookmark/unbookmark(tweet_id)  # → bool

@@ -41,6 +41,7 @@ FALLBACK_QUERY_IDS: dict[str, str] = {
     "GenericTimelineById": "uGSr7alSjR9v6QJAIaqSKQ",
     "TrendHistory": "Sj4T-jSB9pr0Mxtsc1UKZQ",
     "AboutAccountQuery": "zs_jFPFT78rBpXv9Z3U2YQ",
+    "UserByScreenName": "681MIj51w00Aj6dY0GXnHw",
 }
 
 SETTINGS_SCREEN_NAME_RE = re.compile(r'"screen_name":"([^"]+)"')

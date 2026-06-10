@@ -171,6 +171,11 @@ def _format_tweet(tweet, plain: bool = False, show_stats: bool = False) -> str:
         lines.append(f"url: {url}")
     else:
         lines.append(f"\U0001f517 {url}")
+    if tweet.author.profile_image_url:
+        if plain:
+            lines.append(f"avatar: {tweet.author.profile_image_url}")
+        else:
+            lines.append(f"\U0001f464 {tweet.author.profile_image_url}")
 
     # Engagement stats (shown for single-tweet read, not list views)
     if show_stats and not plain:
@@ -181,9 +186,16 @@ def _format_tweet(tweet, plain: bool = False, show_stats: bool = False) -> str:
             parts.append(f"\U0001f501 {tweet.retweet_count}")
         if tweet.reply_count is not None:
             parts.append(f"\U0001f4ac {tweet.reply_count}")
+        if tweet.view_count is not None:
+            parts.append(f"\U0001f441\ufe0f {tweet.view_count}")
         if parts:
             lines.append("  ".join(parts))
     else:
+        if tweet.view_count is not None:
+            if plain:
+                lines.append(f"views: {tweet.view_count}")
+            else:
+                lines.append(f"\U0001f441\ufe0f {tweet.view_count} views")
         lines.append(_SEPARATOR)
 
     return "\n".join(lines)
@@ -213,11 +225,16 @@ def _tweet_to_dict(tweet, include_raw: bool = False) -> dict:
         "replyCount": tweet.reply_count,
         "retweetCount": tweet.retweet_count,
         "likeCount": tweet.like_count,
+        "viewCount": tweet.view_count,
         "conversationId": tweet.conversation_id,
     }
     if tweet.in_reply_to_status_id:
         d["inReplyToStatusId"] = tweet.in_reply_to_status_id
-    d["author"] = {"username": tweet.author.username, "name": tweet.author.name}
+    d["author"] = {
+        "username": tweet.author.username,
+        "name": tweet.author.name,
+        "profileImageUrl": tweet.author.profile_image_url,
+    }
     d["authorId"] = tweet.author_id
     if tweet.quoted_tweet:
         d["quotedTweet"] = _tweet_to_dict(tweet.quoted_tweet, include_raw=include_raw)
@@ -796,8 +813,131 @@ def trending(ctx, count, as_json):
 
 
 # ---------------------------------------------------------------------------
-# about / whoami / check
+# user / about / whoami / check
 # ---------------------------------------------------------------------------
+
+def _profile_to_dict(p, include_raw: bool = False) -> dict:
+    d: dict = {
+        "id": p.id,
+        "username": p.username,
+        "name": p.name,
+        "description": p.description,
+        "location": p.location,
+        "website": p.website,
+        "createdAt": p.created_at,
+        "followersCount": p.followers_count,
+        "followingCount": p.following_count,
+        "tweetCount": p.tweet_count,
+        "mediaCount": p.media_count,
+        "listedCount": p.listed_count,
+        "likesCount": p.likes_count,
+        "isBlueVerified": p.is_blue_verified,
+        "isVerified": p.is_verified,
+        "verifiedType": p.verified_type,
+        "isIdentityVerified": p.is_identity_verified,
+        "verifiedSince": p.verified_since,
+        "profileImageUrl": p.profile_image_url,
+        "profileBannerUrl": p.profile_banner_url,
+        "isProtected": p.is_protected,
+        "canDm": p.can_dm,
+        "pinnedTweetIds": p.pinned_tweet_ids,
+        "professionalType": p.professional_type,
+        "professionalCategory": p.professional_category,
+    }
+    if include_raw and p._raw is not None:
+        d["_raw"] = p._raw
+    return d
+
+
+def _format_profile(p, plain: bool = False) -> str:
+    def line(emoji: str, label: str, value) -> str:
+        return f"{label}: {value}" if plain else f"{emoji} {value}"
+
+    lines = [f"@{p.username} ({p.name})"]
+    if p.description:
+        lines.append(_unescape(p.description))
+    if p.location:
+        lines.append(line("\U0001f4cd", "location", p.location))
+    if p.website:
+        lines.append(line("\U0001f517", "website", p.website))
+    if p.created_at:
+        lines.append(line("\U0001f4c5", "joined", p.created_at))
+
+    counts = []
+    if p.followers_count is not None:
+        counts.append(f"{p.followers_count:,} followers")
+    if p.following_count is not None:
+        counts.append(f"{p.following_count:,} following")
+    if p.tweet_count is not None:
+        counts.append(f"{p.tweet_count:,} tweets")
+    if p.media_count is not None:
+        counts.append(f"{p.media_count:,} media")
+    if p.likes_count is not None:
+        counts.append(f"{p.likes_count:,} likes")
+    if p.listed_count is not None:
+        counts.append(f"{p.listed_count:,} listed")
+    if counts:
+        lines.append(line("\U0001f465", "stats", " · ".join(counts)))
+
+    badges = []
+    if p.verified_type:
+        badges.append(f"{p.verified_type} verified")
+    elif p.is_verified:
+        badges.append("verified")
+    if p.is_blue_verified:
+        badges.append("blue check")
+    if p.is_identity_verified:
+        badges.append("identity verified")
+    if p.is_protected:
+        badges.append("protected")
+    if badges:
+        lines.append(line("✅", "verified", ", ".join(badges)))
+    if p.verified_since:
+        lines.append(line("\U0001f4ce", "verified since", p.verified_since))
+    if p.professional_type:
+        prof = p.professional_type
+        if p.professional_category:
+            prof += f" ({p.professional_category})"
+        lines.append(line("\U0001f4bc", "professional", prof))
+    if p.can_dm is not None:
+        dm = "open" if p.can_dm else "closed"
+        lines.append(f"dms: {dm}" if plain else f"\U0001f4e9 DMs {dm}")
+    if p.pinned_tweet_ids:
+        lines.append(line("\U0001f4cc", "pinned", ", ".join(p.pinned_tweet_ids)))
+    if p.profile_image_url:
+        lines.append(f"avatar: {p.profile_image_url}" if plain
+                     else f"\U0001f464 {p.profile_image_url}")
+    if p.profile_banner_url:
+        lines.append(f"banner: {p.profile_banner_url}" if plain
+                     else f"\U0001f5bc\ufe0f {p.profile_banner_url}")
+    lines.append(f"id: {p.id}")
+    return "\n".join(lines)
+
+
+@main.command("user")
+@click.argument("handle")
+@click.option("--json", "as_json", is_flag=True)
+@click.option("--json-full", "json_full", is_flag=True,
+              help="Include raw API response in _raw field.")
+@click.pass_context
+def user_profile(ctx, handle, as_json, json_full):
+    """Show full profile information for a user."""
+    as_json = as_json or json_full or ctx.obj.get("as_json")
+    plain = ctx.obj.get("plain", False)
+    norm = normalize_handle(handle)
+    if not norm:
+        click.echo(f"Invalid handle: {handle!r}", err=True)
+        sys.exit(1)
+    with _client(ctx) as client:
+        profile = client.get_user_profile(norm, include_raw=json_full)
+    if not profile:
+        click.echo(f"User @{norm} not found.", err=True)
+        sys.exit(1)
+    if as_json:
+        click.echo(json.dumps(_profile_to_dict(profile, include_raw=json_full),
+                               ensure_ascii=False, indent=2))
+    else:
+        click.echo(_format_profile(profile, plain=plain))
 
 @main.command()
 @click.argument("handle")
